@@ -21,6 +21,19 @@ target_link_libraries (camera_test PUBLIC
     ${GFLAGS_LIBRARIES}
 )
 
+add_executable (stream_test_2 
+    stream_test_2.cpp
+)
+
+target_link_libraries (stream_test_2 PUBLIC 
+    ${GLOG_LIBRARIES}
+    ${GFLAGS_LIBRARIES}
+    nvmpi
+    fecpp
+    practical_socket
+    modi_socket
+)
+
 add_subdirectory (nvmpi)
 add_subdirectory (fec)
 add_subdirectory (practical_socket)
