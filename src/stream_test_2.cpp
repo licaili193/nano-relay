@@ -222,7 +222,7 @@ static nv_color_fmt nvcolor_fmt[] =
     {V4L2_PIX_FMT_YUYV, NvBufferColorFormat_YUYV},
     {V4L2_PIX_FMT_YVYU, NvBufferColorFormat_YVYU},
     {V4L2_PIX_FMT_GREY, NvBufferColorFormat_GRAY8},
-    {V4L2_PIX_FMT_YUV420M, NvBufferColorFormat_NV12},
+    {V4L2_PIX_FMT_YUV420M, NvBufferColorFormat_YUV420},
 };
 
 NvBufferColorFormat get_nvbuff_color_fmt(unsigned int v4l2_pixfmt) {
@@ -288,21 +288,6 @@ bool prepare_buffers(context_t* ctx) {
     /* Create Render buffer */
     if (-1 == NvBufferCreateEx(&ctx->render_dmabuf_fd, &input_params)) {
         LOG(FATAL) << "Failed to create NvBuffer";
-    }
-
-    if (ctx->render_dmabuf_fd) {
-        if (-1 == NvBufferMemMap(ctx->render_dmabuf_fd, 0, NvBufferMem_Read,
-                    (void**)&ctx->render_plan_0)) {
-            LOG(FATAL) << "Failed to map render buffer plane 0";
-        }
-        if (-1 == NvBufferMemMap(ctx->render_dmabuf_fd, 1, NvBufferMem_Read,
-                    (void**)&ctx->render_plan_1)) {
-            LOG(FATAL) << "Failed to map render buffer plane 1";
-        }
-        // if (-1 == NvBufferMemMap(ctx->render_dmabuf_fd, 2, NvBufferMem_Read,
-        //             (void**)&ctx->render_plan_2)) {
-        //     LOG(FATAL) << "Failed to map render buffer plane 2";
-        // }
     }
 
     if (ctx->capture_dmabuf) {
@@ -461,6 +446,28 @@ int main(int argc, char** argv) {
         LOG(FATAL) << "Failed to convert the buffer";
       }
 
+      if (-1 == NvBufferMemMap(ctx.render_dmabuf_fd, 0, NvBufferMem_Read,
+                (void**)&ctx.render_plan_0)) {
+        LOG(FATAL) << "Failed to map render buffer plane 0";
+      }
+      if (-1 == NvBufferMemSyncForCpu(ctx.render_dmabuf_fd, 0, (void**)&ctx.render_plan_0)) {
+        LOG(FATAL) << "Failed to sync memory for CPU";
+      }
+      if (-1 == NvBufferMemMap(ctx.render_dmabuf_fd, 1, NvBufferMem_Read,
+                (void**)&ctx.render_plan_1)) {
+        LOG(FATAL) << "Failed to map render buffer plane 1";
+      }
+      if (-1 == NvBufferMemSyncForCpu(ctx.render_dmabuf_fd, 1, (void**)&ctx.render_plan_1)) {
+        LOG(FATAL) << "Failed to sync memory for CPU";
+      }
+      if (-1 == NvBufferMemMap(ctx.render_dmabuf_fd, 2, NvBufferMem_Read,
+                (void**)&ctx.render_plan_2)) {
+        LOG(FATAL) << "Failed to map render buffer plane 2";
+      }
+      if (-1 == NvBufferMemSyncForCpu(ctx.render_dmabuf_fd, 2, (void**)&ctx.render_plan_2)) {
+        LOG(FATAL) << "Failed to sync memory for CPU";
+      }
+
       // Encode frame
       nvFrame frame;
       memset(&frame, 0, sizeof(nvFrame));
@@ -468,7 +475,7 @@ int main(int argc, char** argv) {
       frame.payload_size[0] = width * height;
       frame.payload[1] = ctx.render_plan_1; 
       frame.payload_size[1] = width * height / 4;
-      frame.payload[2] = ctx.render_plan_1 + width * height / 4; 
+      frame.payload[2] = ctx.render_plan_2; 
       frame.payload_size[2] = width * height / 4;    
       frame.flags = 0;
       frame.type = NV_PIX_YUV420;
