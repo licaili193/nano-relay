@@ -17,12 +17,24 @@
 
 #include "NvUtils.h"
 #include "nvbuf_utils.h"
+#include "NvEglRenderer.h"
 
 #include <glog/logging.h>
 #include <gflags/gflags.h>
 
+#include <EGL/egl.h>
+#include <EGL/eglext.h>
+#include <GLES2/gl2.h>
+#include <GLES2/gl2ext.h>
+
+#include <cuda.h>
+#include <cuda_runtime.h>
+
+#include "cudaEGL.h"
+
 #include "nvmpi.h"
 #include "udp_send_socket.h"
+#include "image_processing.h"
 
 DEFINE_string(foreign_addr, "127.0.0.1", "Foreign address");
 DEFINE_int32(foreign_port, 6000, "Foreign port");
@@ -67,10 +79,8 @@ struct context_t {
     bool capture_dmabuf = true;
 
     int render_dmabuf_fd;
-    unsigned char* render_plan_0;
-    unsigned char* render_plan_1;
-    unsigned char* render_plan_2;
-    unsigned int render_size;
+    EGLDisplay egl_display = EGL_NO_DISPLAY;
+    EGLImageKHR egl_image = NULL;
 };
 
 /* Correlate v4l2 pixel format and NvBuffer color format */
@@ -270,8 +280,10 @@ bool prepare_buffers(context_t* ctx) {
         }
 
         if (ctx->cam_pixfmt == V4L2_PIX_FMT_GREY &&
-            params.pitch[0] != params.width[0])
-                ctx->capture_dmabuf = false;
+            params.pitch[0] != params.width[0]) {
+          LOG(WARNING) << "Disabled DAM";
+          ctx->capture_dmabuf = false;
+        }
 
         /* TODO: add multi-planar support
            Currently only supports YUV422 interlaced single-planar */
@@ -283,7 +295,7 @@ bool prepare_buffers(context_t* ctx) {
         }
     }
 
-    input_params.colorFormat = get_nvbuff_color_fmt(V4L2_PIX_FMT_YUV420M);
+    input_params.colorFormat = get_nvbuff_color_fmt(V4L2_PIX_FMT_YUYV);
     input_params.nvbuf_tag = NvBufferTag_VIDEO_CONVERT;
     /* Create Render buffer */
     if (-1 == NvBufferCreateEx(&ctx->render_dmabuf_fd, &input_params)) {
@@ -332,6 +344,52 @@ bool stop_stream(context_t * ctx) {
     return true;
 }
 
+void handle_egl_image(void *pEGLImage, size_t width, size_t height, 
+                      unsigned char*& img_yuv420, uint8_t*& d_img_yuv420, uint8_t*& d_img_yuv420_s) {
+    EGLImageKHR *pImage = (EGLImageKHR *)pEGLImage;
+    EGLImageKHR& image = *pImage;
+    CUresult status;
+    CUeglFrame eglFrame;
+    CUgraphicsResource pResource = NULL;
+
+    cudaFree(0);
+    status = cuGraphicsEGLRegisterImage(&pResource, image,
+                CU_GRAPHICS_MAP_RESOURCE_FLAGS_NONE);
+    if (status != CUDA_SUCCESS)
+    {
+        LOG(INFO) << "cuGraphicsEGLRegisterImage failed:" << status;
+        return;
+    }
+
+    status = cuGraphicsResourceGetMappedEglFrame(&eglFrame, pResource, 0, 0);
+    if (status != CUDA_SUCCESS)
+    {
+        LOG(INFO) << "cuGraphicsSubResourceGetMappedArray failed";
+    }
+
+    status = cuCtxSynchronize();
+    if (status != CUDA_SUCCESS)
+    {
+        LOG(INFO) << "cuCtxSynchronize failed";
+    }
+
+    image_processing::yuyv2YUV(width, height, (uint8_t*)eglFrame.frame.pPitch[0], d_img_yuv420);
+    image_processing::shuffleYUV(width, height, d_img_yuv420, d_img_yuv420_s);
+    image_processing::downloadImageYUV(width, height, d_img_yuv420_s, img_yuv420);
+
+    status = cuCtxSynchronize();
+    if (status != CUDA_SUCCESS)
+    {
+        LOG(INFO) << "cuCtxSynchronize failed after memcpy";
+    }
+
+    status = cuGraphicsUnregisterResource(pResource);
+    if (status != CUDA_SUCCESS)
+    {
+        LOG(INFO) << "cuGraphicsEGLUnRegisterResource failed";
+    }
+}
+
 void cleanup(context_t* ctx) {
     if (ctx->cam_fd > 0) {
         close(ctx->cam_fd);
@@ -377,6 +435,17 @@ int main(int argc, char** argv) {
   fds[0].fd = ctx.cam_fd;
   fds[0].events = POLLIN;
 
+  /* Get defalut EGL display */
+  // ctx.egl_display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+  // if (ctx.egl_display == EGL_NO_DISPLAY) {
+  //   LOG(FATAL) << "Failed to get EGL display connection";
+  // }
+
+  /* Init EGL display connection */
+  // if (!eglInitialize(ctx.egl_display, NULL, NULL)) {
+  //   LOG(FATAL) << "Failed to initialize EGL display connection";
+  // }
+
   // Create codec
   nvEncParam param;
   param.width = width;
@@ -408,6 +477,15 @@ int main(int argc, char** argv) {
   std::unique_ptr<relay::communication::UDPSendSocket> modi_sock =  
       std::unique_ptr<relay::communication::UDPSendSocket>(
           new relay::communication::UDPSendSocket(0, 10, FLAGS_foreign_addr, FLAGS_foreign_port));
+
+  // auto d_img_yuyv = image_processing::allocateImageYUYV(width, height);
+  // CHECK(d_img_yuyv);
+  auto d_img_yuv420 = image_processing::allocateImageYUV(width, height);
+  CHECK(d_img_yuv420);
+  auto d_img_yuv420_s = image_processing::allocateImageYUV(width, height);
+  CHECK(d_img_yuv420_s);
+  unsigned char* img_yuv420 = new unsigned char[width * height * 3 / 2];
+  CHECK(img_yuv420);
 
   running.store(true);
 
@@ -441,41 +519,32 @@ int main(int argc, char** argv) {
       }
 
       /*  Convert the camera buffer from YUV422 to YUV420P */
-      if (-1 == NvBufferTransform(ctx.g_buff[v4l2_buf.index].dmabuff_fd, ctx.render_dmabuf_fd,
-        &transParams)) {
-        LOG(FATAL) << "Failed to convert the buffer";
+      // if (-1 == NvBufferTransform(
+      //     ctx.g_buff[v4l2_buf.index].dmabuff_fd, ctx.render_dmabuf_fd, &transParams)) {
+      //   LOG(FATAL) << "Failed to convert the buffer";
+      // }
+
+      /* Create EGLImage from dmabuf fd */
+      ctx.egl_image = NvEGLImageFromFd(ctx.egl_display, ctx.g_buff[v4l2_buf.index].dmabuff_fd);
+      if (ctx.egl_image == NULL) {
+        LOG(FATAL) << "Failed to map dmabuf fd to EGLImage";
       }
 
-      if (-1 == NvBufferMemMap(ctx.render_dmabuf_fd, 0, NvBufferMem_Read,
-                (void**)&ctx.render_plan_0)) {
-        LOG(FATAL) << "Failed to map render buffer plane 0";
-      }
-      if (-1 == NvBufferMemSyncForCpu(ctx.render_dmabuf_fd, 0, (void**)&ctx.render_plan_0)) {
-        LOG(FATAL) << "Failed to sync memory for CPU";
-      }
-      if (-1 == NvBufferMemMap(ctx.render_dmabuf_fd, 1, NvBufferMem_Read,
-                (void**)&ctx.render_plan_1)) {
-        LOG(FATAL) << "Failed to map render buffer plane 1";
-      }
-      if (-1 == NvBufferMemSyncForCpu(ctx.render_dmabuf_fd, 1, (void**)&ctx.render_plan_1)) {
-        LOG(FATAL) << "Failed to sync memory for CPU";
-      }
-      if (-1 == NvBufferMemMap(ctx.render_dmabuf_fd, 2, NvBufferMem_Read,
-                (void**)&ctx.render_plan_2)) {
-        LOG(FATAL) << "Failed to map render buffer plane 2";
-      }
-      if (-1 == NvBufferMemSyncForCpu(ctx.render_dmabuf_fd, 2, (void**)&ctx.render_plan_2)) {
-        LOG(FATAL) << "Failed to sync memory for CPU";
-      }
+      // Customize handle image
+      handle_egl_image(&ctx.egl_image, width, height, img_yuv420, d_img_yuv420, d_img_yuv420_s);
+
+      /* Destroy EGLImage */
+      NvDestroyEGLImage(ctx.egl_display, ctx.egl_image);
+      ctx.egl_image = NULL;
 
       // Encode frame
       nvFrame frame;
       memset(&frame, 0, sizeof(nvFrame));
-      frame.payload[0] = ctx.render_plan_0;
+      frame.payload[0] = img_yuv420;
       frame.payload_size[0] = width * height;
-      frame.payload[1] = ctx.render_plan_1; 
+      frame.payload[1] = img_yuv420 + width * height; 
       frame.payload_size[1] = width * height / 4;
-      frame.payload[2] = ctx.render_plan_2; 
+      frame.payload[2] = img_yuv420 + width * height * 5 /4; 
       frame.payload_size[2] = width * height / 4;    
       frame.flags = 0;
       frame.type = NV_PIX_YUV420;
@@ -502,6 +571,10 @@ int main(int argc, char** argv) {
   }
 
   cleanup(&ctx);
+  // cudaFree(d_img_yuyv);
+  cudaFree(d_img_yuv420);
+  cudaFree(d_img_yuv420_s);
+  delete[] img_yuv420;
 
   LOG(INFO) << "Finished cleanly";
 
