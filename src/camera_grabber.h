@@ -183,16 +183,17 @@ bool request_camera_buff_mmap(context_t *ctx) {
 
 class CameraGrabber {
  public:
-  CameraGrabber(uint8_t* d_img_yuyv, std::string camera_name, int width, int height) {
+  CameraGrabber(CUcontext* cuda_ctx, uint8_t* d_img_yuyv, std::string camera_name, int width, int height, size_t panel_width, size_t panel_offset) {
+    cuda_ctx_ = cuda_ctx;
     camera_name_ = camera_name;
     // TODO: unify the setting with camera name
     context_.cam_w = width;
     context_.cam_h = height;
-    d_img_yuyv_ = d_img_yuyv_;
+    panel_width_ = panel_width;
+    panel_offset_ = panel_offset;
+    d_img_yuyv_ = d_img_yuyv;
     running_.store(false);
     new_image_.store(false);
-
-    initializeCamera(camera_name);
   }
 
   ~CameraGrabber() {
@@ -225,13 +226,18 @@ class CameraGrabber {
 
   bool prepareBuffers();
 
-  void handleEglImage(void *pEGLImage, size_t width, size_t height, uint8_t* d_img_yuyv);
+  void handleEglImage(void *pEGLImage, size_t width, size_t height);
 
   void cleanup();
+
+  CUcontext* cuda_ctx_ = nullptr;
 
   context_t context_;
   uint8_t* d_img_yuyv_ = nullptr;
   std::string camera_name_ = "/dev/video0";
+
+  size_t panel_width_ = 640;
+  size_t panel_offset_ = 0;
 
   std::atomic_bool running_;
   std::thread t_;

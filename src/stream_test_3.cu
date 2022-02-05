@@ -42,7 +42,9 @@
 
 DEFINE_string(foreign_addr, "127.0.0.1", "Foreign address");
 DEFINE_int32(foreign_port, 6000, "Foreign port");
-DEFINE_string(camera, "/dev/video0", "Camera name");
+DEFINE_string(camera_1, "/dev/video0", "Camera name");
+DEFINE_string(camera_2, "/dev/video1", "Camera name");
+DEFINE_string(camera_3, "/dev/video2", "Camera name");
 
 constexpr int width = 640;
 constexpr int height = 480;
@@ -51,6 +53,8 @@ constexpr size_t idr_interval = 10;
 constexpr float framerate = 30.f;
 
 std::atomic_bool running;
+
+CUcontext cuda_context;
 
 void myHandler(int s){
   running.store(false);
@@ -70,9 +74,24 @@ int main(int argc, char** argv) {
   sigIntHandler.sa_flags = 0;
   sigaction(SIGINT, &sigIntHandler, NULL);
 
+  cudaSetDevice(0);
+  auto d_img_yuyv = image_processing::allocateImageYUYV(width * 3, height);
+  CHECK(d_img_yuyv);
+  auto d_img_yuv420 = image_processing::allocateImageYUV(width * 3, height);
+  CHECK(d_img_yuv420);
+  auto d_img_yuv420_s = image_processing::allocateImageYUV(width * 3, height);
+  CHECK(d_img_yuv420_s);
+  unsigned char* img_yuv420 = new unsigned char[width * 3 * height * 3 / 2];
+  CHECK(img_yuv420);
+
+  CHECK_EQ(CUDA_SUCCESS, cuCtxGetCurrent(&cuda_context));
+  CameraGrabber grabber_1(&cuda_context, d_img_yuyv, FLAGS_camera_1, width, height, width * 3, 0);
+  CameraGrabber grabber_2(&cuda_context, d_img_yuyv, FLAGS_camera_2, width, height, width * 3, width);
+  // CameraGrabber grabber_3(&cuda_context, d_img_yuyv, FLAGS_camera_3, width, height, width * 3, width * 2);
+
   // Create codec
   nvEncParam param;
-  param.width = width;
+  param.width = width * 3;
   param.height = height;
   param.profile = 0; // V4L2_MPEG_VIDEO_H265_PROFILE_MAIN
   param.level = 3; // V4L2_MPEG_VIDEO_H265_LEVEL_2_0_HIGH_TIER
@@ -101,44 +120,36 @@ int main(int argc, char** argv) {
   std::unique_ptr<relay::communication::UDPSendSocket> modi_sock =  
       std::unique_ptr<relay::communication::UDPSendSocket>(
           new relay::communication::UDPSendSocket(0, 10, FLAGS_foreign_addr, FLAGS_foreign_port));
-
-  auto d_img_yuyv = image_processing::allocateImageYUYV(width, height);
-  CHECK(d_img_yuyv);
-  auto d_img_yuv420 = image_processing::allocateImageYUV(width, height);
-  CHECK(d_img_yuv420);
-  auto d_img_yuv420_s = image_processing::allocateImageYUV(width, height);
-  CHECK(d_img_yuv420_s);
-  unsigned char* img_yuv420 = new unsigned char[width * height * 3 / 2];
-  CHECK(img_yuv420);
-
-  CameraGrabber grabber(d_img_yuyv, FLAGS_camera, width, height);
   
   running.store(true);
-  grabber.startStream();
+  grabber_1.startStream();
+  grabber_2.startStream();
+  // grabber_3.startStream();
 
   /* Wait for camera event with timeout = 5000 ms */
   while (running.load()) {
-    if (!grabber.newImage()) {
+    if (!grabber_1.newImage()) {
+      // Only use grabber 1 to keep the frame rate
       continue;
     }
 
-    image_processing::yuyv2YUV(width, height, d_img_yuyv, d_img_yuv420);
-    image_processing::shuffleYUV(width, height, d_img_yuv420, d_img_yuv420_s);
-    image_processing::downloadImageYUV(width, height, d_img_yuv420_s, img_yuv420);
+    image_processing::yuyv2YUV(width * 3, height, d_img_yuyv, d_img_yuv420);
+    image_processing::shuffleYUV(width * 3, height, d_img_yuv420, d_img_yuv420_s);
+    image_processing::downloadImageYUV(width * 3, height, d_img_yuv420_s, img_yuv420);
 
     // Encode frame
     nvFrame frame;
     memset(&frame, 0, sizeof(nvFrame));
     frame.payload[0] = img_yuv420;
-    frame.payload_size[0] = width * height;
-    frame.payload[1] = img_yuv420 + width * height; 
-    frame.payload_size[1] = width * height / 4;
-    frame.payload[2] = img_yuv420 + width * height * 5 /4; 
-    frame.payload_size[2] = width * height / 4;    
+    frame.payload_size[0] = width * 3 * height;
+    frame.payload[1] = img_yuv420 + width * 3 * height; 
+    frame.payload_size[1] = width * 3 * height / 4;
+    frame.payload[2] = img_yuv420 + width * 3 * height * 5 /4; 
+    frame.payload_size[2] = width * 3 * height / 4;    
     frame.flags = 0;
     frame.type = NV_PIX_YUV420;
-    frame.width = width;
-    frame.height = height;
+    frame.width = width * 3;
+    frame.height = height * 3;
 
     int ret = nvmpi_encoder_put_frame(nvm_ctx, &frame);
 
@@ -153,7 +164,9 @@ int main(int argc, char** argv) {
     }
   }
 
-  grabber.stopStream();
+  grabber_1.stopStream();
+  grabber_2.stopStream();
+  // grabber_3.stopStream();
   cudaFree(d_img_yuyv);
   cudaFree(d_img_yuv420);
   cudaFree(d_img_yuv420_s);

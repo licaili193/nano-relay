@@ -32,6 +32,8 @@ void yuyv2YUV(size_t width, size_t height, uint8_t* d_img, uint8_t* d_img_out);
 
 void shuffleYUV(size_t width, size_t height, uint8_t* d_img, uint8_t* d_img_out);
 
+void copyYUYVWithOffset(uint8_t* d_dst, size_t width_dst, uint8_t* d_src, size_t width, size_t height, size_t offset);
+
 }
 
 #endif

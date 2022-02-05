@@ -42,6 +42,7 @@ target_link_libraries (camera_grabber ${CUDA_LINK_LIBRARIES_KEYWORD}
     OpenGL::EGL
 
     nvmpi # include this for nvbuf_utils.h 
+    image_processing
 )
 
 cuda_add_executable (stream_test_3 

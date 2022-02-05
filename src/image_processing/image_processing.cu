@@ -117,6 +117,20 @@ __global__ void shuffleYUVPixel(size_t width, size_t height, uint8_t* d_img, uin
   }
 }
 
+// Thread per block: 1D - 512
+// Blocks per grid: 2D - height, (width / 2 + 511) / 512
+__global__ void copyYUYVPixelOffset(size_t width, size_t height, size_t width_dst, size_t offset, uint8_t* d_img, uint8_t* d_img_out) {
+  size_t i = blockIdx.x;
+  size_t j = blockIdx.y * 512 + threadIdx.x;
+
+  if (i < height && j < width / 2) {
+    d_img_out[i * width_dst * 2 + offset * 2 + 4 * j] = d_img[2 * width * i + 4 * j];
+    d_img_out[i * width_dst * 2 + offset * 2 + 4 * j + 1] = d_img[2 * width * i + 4 * j + 1];
+    d_img_out[i * width_dst * 2 + offset * 2 + 4 * j + 2] = d_img[2 * width * i + 4 * j + 2];
+    d_img_out[i * width_dst * 2 + offset * 2 + 4 * j + 3] = d_img[2 * width * i + 4 * j + 3];
+  }
+}
+
 }
 
 uint8_t* allocateImage(size_t width, size_t height) {
@@ -198,6 +212,14 @@ void shuffleYUV(size_t width, size_t height, uint8_t* d_img, uint8_t* d_img_out)
 
   dim3 gridDims(height / 2, (width / 2 + 511) / 512);
   shuffleYUVPixel<<<gridDims, 512>>>(width, height, d_img, d_img_out);
+}
+
+void copyYUYVWithOffset(uint8_t* d_dst, size_t width_dst, uint8_t* d_src, size_t width, size_t height, size_t offset) {
+  CHECK(d_dst);
+  CHECK(d_src);
+
+  dim3 gridDims(height, (width / 2 + 511) / 512);
+  copyYUYVPixelOffset<<<gridDims, 512>>>(width, height, width_dst, offset, d_src, d_dst);
 }
 
 }

@@ -1,3 +1,5 @@
+#include "image_processing.h"
+
 #include "camera_grabber.h"
 
 bool CameraGrabber::initializeCamera(std::string camera_name) {
@@ -132,6 +134,13 @@ bool CameraGrabber::prepareBuffers() {
 }
 
 void CameraGrabber::worker() {
+  CHECK(cuda_ctx_);
+  CHECK_EQ(CUDA_SUCCESS, cuCtxSetCurrent(*cuda_ctx_));
+  cudaSetDevice(0);
+
+  // TODO: Has to be initialized in the worker?
+  initializeCamera(camera_name_);
+
   context_t& ctx = context_;
 
   enum v4l2_buf_type type;
@@ -197,7 +206,7 @@ void CameraGrabber::worker() {
   
       // Customize handle image
       // TODO: TO CHANGE HERE!!!
-      handleEglImage(&ctx.egl_image, ctx.cam_w, ctx.cam_h, d_img_yuyv_);
+      handleEglImage(&ctx.egl_image, ctx.cam_w, ctx.cam_h);
   
       /* Destroy EGLImage */
       NvDestroyEGLImage(ctx.egl_display, ctx.egl_image);
@@ -224,7 +233,7 @@ void CameraGrabber::worker() {
   cleanup();
 }
 
-void CameraGrabber::handleEglImage(void *pEGLImage, size_t width, size_t height, uint8_t* d_img_yuyv) {
+void CameraGrabber::handleEglImage(void *pEGLImage, size_t width, size_t height) {
   EGLImageKHR *pImage = (EGLImageKHR *)pEGLImage;
   EGLImageKHR& image = *pImage;
   CUresult status;
@@ -248,7 +257,8 @@ void CameraGrabber::handleEglImage(void *pEGLImage, size_t width, size_t height,
     LOG(INFO) << "cuCtxSynchronize failed";
   }
 
-  cudaMemcpy(d_img_yuyv, (uint8_t*)eglFrame.frame.pPitch[0], width * height * 2, cudaMemcpyDeviceToDevice);
+  // CHECK_EQ(CUDA_SUCCESS, cudaMemcpy(d_img_yuyv, (uint8_t*)eglFrame.frame.pPitch[0], width * height * 2, cudaMemcpyDeviceToDevice));
+  image_processing::copyYUYVWithOffset(d_img_yuyv_, panel_width_, (uint8_t*)eglFrame.frame.pPitch[0], width, height, panel_offset_);
   new_image_.store(true);
 
   status = cuCtxSynchronize();
