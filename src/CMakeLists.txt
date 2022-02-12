@@ -64,6 +64,21 @@ target_link_libraries (stream_test_3 ${CUDA_LINK_LIBRARIES_KEYWORD}
     camera_grabber # TODO: clean up the dependency
 )
 
+add_executable (fake_vehicle_node 
+    fake_vehicle_node.cpp
+)
+
+target_link_libraries (fake_vehicle_node PUBLIC 
+    practical_socket
+    modi_socket
+    ${GLOG_LIBRARIES}
+    ${GFLAGS_LIBRARIES}
+)
+
+target_include_directories(fake_vehicle_node PRIVATE 
+    ${CURRENT_CMAKE_SOURCE_DIR}
+)
+
 add_subdirectory (nvmpi)
 add_subdirectory (fec)
 add_subdirectory (practical_socket)
